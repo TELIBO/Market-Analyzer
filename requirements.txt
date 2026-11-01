@@ -1,0 +1,8 @@
+ddgs
+langchain-groq
+langgraph
+pandas
+pydantic
+python-dotenv
+streamlit>=1.35,<2
+yfinance
