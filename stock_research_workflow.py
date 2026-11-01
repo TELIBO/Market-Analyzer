@@ -461,7 +461,16 @@ def _calculate_market_data(symbol: str, period: str) -> tuple[dict[str, Any], di
         info = {}
         errors.append(f"{symbol} fundamentals unavailable: {exc}")
 
-    financial_metrics = _select_financials(info)
+    market_cap_fallback = None
+    profile_market_cap = _finite_number(info.get("marketCap"))
+    if profile_market_cap is None or profile_market_cap <= 0:
+        try:
+            fast_info = getattr(ticker, "fast_info", None)
+            if fast_info is not None:
+                market_cap_fallback = fast_info.get("market_cap")
+        except Exception as exc:
+            errors.append(f"{symbol} fast market-cap data unavailable: {exc}")
+    financial_metrics = _select_financials(info, market_cap_fallback)
     sec_metrics, sec_error = _retrieve_sec_statement_metrics(
         symbol, financial_metrics.get("cik")
     )
@@ -630,7 +639,7 @@ def _calculate_market_data(symbol: str, period: str) -> tuple[dict[str, Any], di
         errors.append(f"{symbol} historical prices unavailable: {exc}")
     if history is None or history.empty or "Close" not in history:
         errors.append(f"{symbol} returned no usable historical prices.")
-        return {}, _select_financials(info), errors
+        return {}, financial_metrics, errors
 
     close = history["Close"].dropna()
     close = close[close.map(lambda value: (_finite_number(value) or 0) > 0)]

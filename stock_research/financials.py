@@ -40,7 +40,10 @@ def _finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _select_financials(info: dict[str, Any]) -> dict[str, Any]:
+def _select_financials(
+    info: dict[str, Any],
+    market_cap_fallback: Any = None,
+) -> dict[str, Any]:
     selected: dict[str, Any] = {}
     for output, field in FINANCIAL_FIELDS.items():
         value = info.get(field)
@@ -50,6 +53,12 @@ def _select_financials(info: dict[str, Any]) -> dict[str, Any]:
             selected[output] = value
         elif isinstance(value, str) and value.strip():
             selected[output] = value.strip()[:160]
+    profile_market_cap = _finite_number(info.get("marketCap"))
+    fallback_market_cap = _finite_number(market_cap_fallback)
+    if (profile_market_cap is None or profile_market_cap <= 0) and (
+        fallback_market_cap is not None and fallback_market_cap > 0
+    ):
+        selected["market_cap"] = fallback_market_cap
     selected["metadata"] = {
         "provider": "Yahoo Finance via yfinance",
         "retrieved_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -61,7 +70,14 @@ def _select_financials(info: dict[str, Any]) -> dict[str, Any]:
             "profit_margin": "Yahoo Finance reported margin field; exact statement period not provided",
             "free_cash_flow": "Yahoo Finance reported cash-flow field; exact statement period not provided",
             "total_cash": "Yahoo Finance reported balance-sheet field; exact statement date not provided",
-            "market_cap": "Market value at retrieval; price and share count may update independently",
+            "market_cap": (
+                "Yahoo Finance fast_info market value calculated from the latest available "
+                "share count and price at retrieval"
+                if (profile_market_cap is None or profile_market_cap <= 0)
+                and fallback_market_cap is not None
+                and fallback_market_cap > 0
+                else "Market value at retrieval; price and share count may update independently"
+            ),
             "pe": "Yahoo Finance trailingPE; market quote can update independently",
             "forward_pe": "Yahoo Finance forwardPE; estimate-based, not a reported historical result",
         },

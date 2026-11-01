@@ -61,6 +61,35 @@ def test_calculates_market_summary_from_history(monkeypatch: pytest.MonkeyPatch)
     assert financials["company_name"] == "Amazon"
 
 
+def test_market_cap_falls_back_to_yahoo_fast_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    history = pd.DataFrame(
+        {
+            "Close": [275.0, 278.22],
+            "Adj Close": [275.0, 278.22],
+            "Open": [274.0, 276.0],
+            "High": [279.0, 280.0],
+            "Low": [273.0, 275.0],
+            "Volume": [1_000, 1_100],
+        },
+        index=pd.to_datetime(["2026-10-29", "2026-10-30"]),
+    )
+
+    class FakeTicker:
+        info = {}
+        fast_info = {"market_cap": 3_400_000_000_000}
+
+        def history(self, **_kwargs):
+            return history
+
+    monkeypatch.setattr(workflow.yf, "Ticker", lambda _symbol: FakeTicker())
+    _market, financials, errors = workflow._calculate_market_data("GOOG", "2y")
+
+    assert not errors
+    assert financials["market_cap"] == 3_400_000_000_000
+    assert "fast_info" in financials["metadata"]["profile_metric_periods"]["market_cap"]
+
+
 def test_calculates_comparable_quarterly_financial_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SEC_USER_AGENT", raising=False)
     latest = pd.Timestamp("2026-09-30")
