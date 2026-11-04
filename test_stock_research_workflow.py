@@ -90,6 +90,45 @@ def test_market_cap_falls_back_to_yahoo_fast_info(monkeypatch: pytest.MonkeyPatc
     assert "fast_info" in financials["metadata"]["profile_metric_periods"]["market_cap"]
 
 
+def test_retrieve_market_includes_global_indices_and_currency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    dates = pd.to_datetime(["2026-10-29", "2026-10-30"])
+
+    class FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+            if symbol == "RELIANCE.NS":
+                self.info = {
+                    "longName": "Reliance Industries",
+                    "marketCap": 20_000_000_000_000,
+                    "currency": "INR",
+                    "exchange": "NSI",
+                }
+            else:
+                self.info = {"currency": "INR" if symbol in {"^NSEI", "^BSESN"} else "USD"}
+
+        def history(self, **_kwargs):
+            if self.symbol == "RELIANCE.NS":
+                return pd.DataFrame(
+                    {
+                        "Close": [100.0, 101.0],
+                        "Open": [99.0, 100.0],
+                        "High": [102.0, 103.0],
+                        "Low": [98.0, 99.0],
+                        "Volume": [1_000, 1_100],
+                    },
+                    index=dates,
+                )
+            return pd.DataFrame({"Close": [10_000.0, 10_100.0]}, index=dates)
+
+    monkeypatch.setattr(workflow.yf, "Ticker", lambda symbol: FakeTicker(symbol))
+    result = workflow.retrieve_market({"tickers": ["RELIANCE.NS"], "period": "1y"})
+
+    assert result["market_summary"]["RELIANCE.NS"]["currency"] == "INR"
+    assert {"^NSEI", "^BSESN"} <= set(result["global_indices"])
+    assert result["global_indices"]["^NSEI"]["name"] == "NIFTY 50 (NSE)"
+
+
 def test_calculates_comparable_quarterly_financial_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SEC_USER_AGENT", raising=False)
     latest = pd.Timestamp("2026-09-30")
@@ -1608,6 +1647,7 @@ def test_report_prompt_requests_concise_analytical_sections_without_repeating_da
     assert "under 360 words" in prompt
     assert "do not repeat the deterministic market snapshot" in prompt.lower()
     assert "compact analyst thesis" in prompt.lower()
+    assert "technical analyst tone" in prompt.lower()
     assert "connect each cited fact to its business implication" in prompt.lower()
     assert "2-4 concise markdown bullet points per section" in prompt.lower()
     assert "avoid canned phrases" in prompt.lower()
@@ -2080,3 +2120,7 @@ def test_currency_markdown_escaping_only_escapes_numeric_amounts() -> None:
     assert dashboard._escape_currency_markdown(text) == (
         r"FCF was -&#36;2.47B; range &#36;240-247B; escaped \$3; variable $x$."
     )
+
+
+def test_money_formatting_uses_currency_symbol() -> None:
+    assert dashboard._money_with_currency(1_000_000_000, "INR") == "₹1.00B"

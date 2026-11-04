@@ -13,6 +13,7 @@ python -m streamlit run streamlit_app.py
 ```
 
 Enter a company name (for example, `Amazon` or `NVIDIA`) in the dashboard. Select the matching public listing from Yahoo Finance search results, then run the research. The selected listing resolves the company name to its market symbol; users do not need to know or enter a ticker. The dashboard streams completed workflow stages and shows market data, dated financial metrics, cited news, validation notes, and the report.
+Market capitalization and statement amounts are shown in the retrieved financial currency (for example, INR for Indian listings), and the performance tab includes a global index snapshot (including NSE NIFTY 50 and BSE SENSEX) for additional technical context.
 
 The workflow remains importable from `stock_research_workflow.py` for compatibility. Statement-based financial normalization lives in `stock_research/financials.py`, while SEC EDGAR retrieval and dated-source reconciliation live in `stock_research/sec.py`.
 
