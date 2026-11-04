@@ -41,6 +41,17 @@ from stock_research.financials import (
     _statement_value,
 )
 
+GLOBAL_INDICES = (
+    ("^NSEI", "NIFTY 50 (NSE)"),
+    ("^BSESN", "BSE SENSEX"),
+    ("^GSPC", "S&P 500"),
+    ("^DJI", "Dow Jones Industrial Average"),
+    ("^IXIC", "NASDAQ Composite"),
+    ("^FTSE", "FTSE 100"),
+    ("^N225", "Nikkei 225"),
+    ("^HSI", "Hang Seng Index"),
+)
+
 load_dotenv()
 
 PERIOD_ALIASES = {
@@ -98,6 +109,7 @@ class ResearchState(TypedDict, total=False):
     intent: str
     input_status: str
     market_summary: dict[str, Any]
+    global_indices: dict[str, Any]
     financial_metrics: dict[str, dict[str, Any]]
     news_evidence: list[dict[str, Any]]
     issuer_reported_fcf: dict[str, dict[str, Any]]
@@ -685,6 +697,8 @@ def _calculate_market_data(symbol: str, period: str) -> tuple[dict[str, Any], di
     market = {
         "ticker": symbol,
         "company_name": info.get("longName") or info.get("shortName") or symbol,
+        "exchange": info.get("exchange") or info.get("fullExchangeName"),
+        "currency": info.get("currency") or info.get("financialCurrency"),
         "date": str(end_date),
         "close": round(end_price, 2),
         "daily_change_percent": daily_return,
@@ -704,8 +718,37 @@ def _calculate_market_data(symbol: str, period: str) -> tuple[dict[str, Any], di
     return market, financial_metrics, errors
 
 
+def _calculate_global_index_data(symbol: str, label: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        history = ticker.history(period="5d", interval="1d", auto_adjust=False)
+        if history is None or history.empty or "Close" not in history:
+            return None, f"{label} ({symbol}) index prices unavailable."
+        close = history["Close"].dropna()
+        close = close[close.map(lambda value: (_finite_number(value) or 0) > 0)]
+        if close.empty:
+            return None, f"{label} ({symbol}) has no finite positive closing prices."
+        end_index = close.index[-1]
+        end_price = float(close.iloc[-1])
+        prior = float(close.iloc[-2]) if len(close) > 1 else None
+        daily_return = round((end_price / prior - 1) * 100, 2) if prior and prior > 0 else None
+        return {
+            "symbol": symbol,
+            "name": label,
+            "exchange": info.get("exchange") or info.get("fullExchangeName"),
+            "currency": info.get("currency") or info.get("financialCurrency"),
+            "date": str(end_index.date()),
+            "close": round(end_price, 2),
+            "daily_change_percent": daily_return,
+        }, None
+    except Exception as exc:  # pragma: no cover - defensive path
+        return None, f"{label} ({symbol}) index retrieval failed: {exc}"
+
+
 def retrieve_market(state: ResearchState) -> dict[str, Any]:
     summary: dict[str, Any] = {}
+    indices: dict[str, Any] = {}
     financials: dict[str, Any] = {}
     errors: list[str] = []
     for symbol in state["tickers"]:
@@ -718,7 +761,18 @@ def retrieve_market(state: ResearchState) -> dict[str, Any]:
             errors.extend(symbol_errors)
         except Exception as exc:
             errors.append(f"{symbol} market retrieval failed: {exc}")
-    return {"market_summary": summary, "financial_metrics": financials, "market_errors": errors}
+    for index_symbol, index_label in GLOBAL_INDICES:
+        index_data, index_error = _calculate_global_index_data(index_symbol, index_label)
+        if index_data:
+            indices[index_symbol] = index_data
+        if index_error:
+            errors.append(index_error)
+    return {
+        "market_summary": summary,
+        "global_indices": indices,
+        "financial_metrics": financials,
+        "market_errors": errors,
+    }
 
 
 def _canonical_url(url: str) -> str:
@@ -1541,8 +1595,10 @@ def prepare_report_input(state: ResearchState) -> dict[str, Any]:
 
 
 def _market_section(state: ResearchState) -> str:
-    def format_price(value: Any) -> str:
-        return "N/A" if value is None else f"{value:,.2f}"
+    def format_price(value: Any, currency: Any = None) -> str:
+        if value is None:
+            return "N/A"
+        return f"{_currency_prefix(currency)}{value:,.2f}"
 
     lines: list[str] = []
     for symbol in state["tickers"]:
@@ -1550,23 +1606,35 @@ def _market_section(state: ResearchState) -> str:
         if not market:
             lines.append(f"{symbol}: market data unavailable.")
             continue
+        currency = market.get("currency")
         daily = market.get("daily_change_percent")
         change = f"{daily:+.2f}%" if isinstance(daily, (int, float)) else "N/A"
         lines.append(
-            f"{symbol} ({market.get('company_name', symbol)}): close ${market['close']:.2f} "
+            f"{symbol} ({market.get('company_name', symbol)}): close {format_price(market['close'], currency)} "
             f"on {market['date']}; daily change {change}."
         )
         volume = f"{market['volume']:,}" if market.get("volume") is not None else "N/A"
         lines.append(
-            f"Open/high/low: ${format_price(market.get('open'))} / "
-            f"${format_price(market.get('high'))} / "
-            f"${format_price(market.get('low'))}; volume: {volume}"
+            f"Open/high/low: {format_price(market.get('open'), currency)} / "
+            f"{format_price(market.get('high'), currency)} / "
+            f"{format_price(market.get('low'), currency)}; volume: {volume}"
         )
         lines[-1] += (
             f"; 20-day average volume: {market['average_volume_20d']:,}."
             if market.get("average_volume_20d") is not None
             else "; 20-day average volume: N/A."
         )
+    indices = state.get("global_indices", {})
+    if indices:
+        lines.append("Global index snapshot:")
+        for index_data in indices.values():
+            change = index_data.get("daily_change_percent")
+            change_text = f"{change:+.2f}%" if isinstance(change, (int, float)) else "N/A"
+            lines.append(
+                f"- {index_data.get('name', index_data.get('symbol', 'Index'))}: "
+                f"{format_price(index_data.get('close'), index_data.get('currency'))} "
+                f"on {index_data.get('date', 'unavailable')} ({change_text})."
+            )
     return "\n".join(lines) or "Market data unavailable."
 
 
@@ -1588,8 +1656,8 @@ def _history_section(state: ResearchState) -> str:
             else:
                 lines.append(
                     f"- {label}: {metric['return_percent']:+.2f}% "
-                    f"(from ${metric['start_price']:.2f} on {metric['start_date']} "
-                    f"to ${metric['end_price']:.2f} on {metric['end_date']})."
+                    f"(from {_currency_prefix(market.get('currency'))}{metric['start_price']:.2f} on {metric['start_date']} "
+                    f"to {_currency_prefix(market.get('currency'))}{metric['end_price']:.2f} on {metric['end_date']})."
                 )
     return "\n".join(lines)
 
@@ -1605,7 +1673,7 @@ def _price_volume_section(state: ResearchState) -> str:
         daily_text = f"{daily:+.2f}%" if isinstance(daily, (int, float)) else "unavailable"
         lines.append(
             f"- {symbol}: daily change {daily_text}; "
-            f"close ${market['close']:.2f} on {market['date']}."
+            f"close {_currency_prefix(market.get('currency'))}{market['close']:.2f} on {market['date']}."
         )
         current = market.get("volume")
         average = market.get("average_volume_20d")
@@ -1723,19 +1791,39 @@ def _news_factors(state: ResearchState, positive: bool) -> list[str]:
     return factors
 
 
-def _format_metric(key: str, value: Any) -> str:
+def _currency_prefix(currency: Any) -> str:
+    code = str(currency or "").strip().upper()
+    if code in {"", "USD"}:
+        return "$"
+    return {
+        "INR": "₹",
+        "EUR": "€",
+        "GBP": "£",
+        "JPY": "¥",
+        "CNY": "¥",
+        "KRW": "₩",
+        "CAD": "C$",
+        "AUD": "A$",
+        "CHF": "CHF ",
+        "HKD": "HK$",
+        "SGD": "S$",
+    }.get(code, f"{code} ")
+
+
+def _format_metric(key: str, value: Any, currency: Any = None) -> str:
     if not isinstance(value, (int, float)):
         return str(value)
     if key == "market_cap":
         absolute = abs(value)
         sign = "-" if value < 0 else ""
+        prefix = _currency_prefix(currency)
         if absolute >= 1_000_000_000_000:
-            return f"{sign}${absolute / 1_000_000_000_000:.2f}T"
+            return f"{sign}{prefix}{absolute / 1_000_000_000_000:.2f}T"
         if absolute >= 1_000_000_000:
-            return f"{sign}${absolute / 1_000_000_000:.2f}B"
+            return f"{sign}{prefix}{absolute / 1_000_000_000:.2f}B"
         if absolute >= 1_000_000:
-            return f"{sign}${absolute / 1_000_000:.2f}M"
-        return f"{sign}${absolute:,.2f}"
+            return f"{sign}{prefix}{absolute / 1_000_000:.2f}M"
+        return f"{sign}{prefix}{absolute:,.2f}"
     if key in {"revenue_growth", "profit_margin", "return_on_equity", "dividend_yield"}:
         return f"{value * 100:.2f}%"
     if key == "debt_to_equity":
@@ -1743,7 +1831,7 @@ def _format_metric(key: str, value: Any) -> str:
     if key in {"pe", "forward_pe", "enterprise_to_ebitda"}:
         return f"{value:.2f}x"
     if key in {"total_cash", "free_cash_flow"}:
-        return _format_metric("market_cap", value)
+        return _format_metric("market_cap", value, currency=currency)
     return f"{value:,.2f}"
 
 
@@ -1991,6 +2079,10 @@ def _analyst_summary_for_ticker(state: ResearchState, ticker: str) -> str:
     stance, _positives, _risks, rationale = _research_stance(ticker_state, ticker)
     market = state.get("market_summary", {}).get(ticker, {})
     financials = state.get("financial_metrics", {}).get(ticker, {})
+    metric_currency = (
+        financials.get("metadata", {}).get("financial_currency")
+        or market.get("currency")
+    )
     company = (
         financials.get("company_name")
         or market.get("company_name")
@@ -2064,7 +2156,7 @@ def _analyst_summary_for_ticker(state: ResearchState, ticker: str) -> str:
         else:
             cash_read = "roughly break-even cash generation after operating and investment activity"
         operating_points.append(
-            f"free cash flow is {_format_metric('free_cash_flow', cash_flow)} ({cash_basis}), {cash_read} "
+            f"free cash flow is {_format_metric('free_cash_flow', cash_flow, currency=metric_currency)} ({cash_basis}), {cash_read} "
             f"{_financial_source_citation(cash_basis)}"
         )
     if operating_points:
@@ -2284,6 +2376,10 @@ def _company_overview_section(state: ResearchState) -> str:
     for symbol in state.get("tickers", []):
         market_row = state.get("market_summary", {}).get(symbol, {})
         metrics = state.get("financial_metrics", {}).get(symbol, {})
+        metric_currency = (
+            metrics.get("metadata", {}).get("financial_currency")
+            or market_row.get("currency")
+        )
         name = metrics.get("company_name") or market_row.get("company_name") or symbol
         sector = metrics.get("sector")
         industry = metrics.get("industry")
@@ -2347,7 +2443,9 @@ def _company_overview_section(state: ResearchState) -> str:
             period = metrics.get("metadata", {}).get("profile_metric_periods", {}).get(
                 key, "Yahoo Finance profile field; period unavailable"
             )
-            selected.append(f"{label}: {_format_metric(key, metrics[key])} ({period})")
+            selected.append(
+                f"{label}: {_format_metric(key, metrics[key], currency=metric_currency)} ({period})"
+            )
         if selected:
             lines.append(f"  Selected reported metrics: {'; '.join(selected)} [YFINANCE].")
         statements = metrics.get("statement_metrics", {})
@@ -2403,12 +2501,12 @@ def _company_overview_section(state: ResearchState) -> str:
                 formatted = f"{value:+.2f}%"
             elif value_type == "ratio":
                 formatted = (
-                    f"{value:.2f}% (total debt {_format_metric('market_cap', statement.get('numerator'))} / "
-                    f"stockholders' equity {_format_metric('market_cap', statement.get('denominator'))}; "
+                    f"{value:.2f}% (total debt {_format_metric('market_cap', statement.get('numerator'), currency=metric_currency)} / "
+                    f"stockholders' equity {_format_metric('market_cap', statement.get('denominator'), currency=metric_currency)}; "
                     "total liabilities excluded)"
                 )
             else:
-                formatted = _format_metric("free_cash_flow", value)
+                formatted = _format_metric("free_cash_flow", value, currency=metric_currency)
             source_citation = _financial_source_citation(
                 f"{statement.get('source') or ''} {statement.get('basis') or ''}"
             )
@@ -2798,8 +2896,8 @@ def _report_prompt(state: ResearchState) -> str:
     system = (
         "Write only these three analytical report sections, with exactly these headings: "
         + "; ".join(LLM_REPORT_SECTIONS)
-        + ". Keep the complete response under 360 words. Write for an intelligent reader who is new to investing: "
-        "use short, natural sentences and explain any necessary financial term in context. "
+        + ". Keep the complete response under 360 words. Use a technical analyst tone: "
+        "be concise, name the metric and period behind each claim, and explain any necessary financial term in context. "
         "Make the executive summary a compact analyst thesis, not a list of figures: explain the strongest "
         "business signal, the most important counterpoint, and why that combination matters to an investor. "
         "For bullish and risk sections, use 2-4 concise markdown bullet points per section. Each bullet should connect "

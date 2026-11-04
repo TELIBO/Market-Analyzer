@@ -81,22 +81,29 @@ def run_ticker(
 def _format_money(value: Any) -> str:
     if not isinstance(value, (int, float)):
         return "Unavailable"
+    return workflow._format_metric("market_cap", value)
+
+
+def _money_with_currency(value: Any, currency: Any = None) -> str:
+    if not isinstance(value, (int, float)):
+        return "Unavailable"
     absolute = abs(value)
     sign = "-" if value < 0 else ""
+    prefix = workflow._currency_prefix(currency)
     if absolute >= 1_000_000_000_000:
-        return f"{sign}${absolute / 1_000_000_000_000:.2f}T"
+        return f"{sign}{prefix}{absolute / 1_000_000_000_000:.2f}T"
     if absolute >= 1_000_000_000:
-        return f"{sign}${absolute / 1_000_000_000:.2f}B"
+        return f"{sign}{prefix}{absolute / 1_000_000_000:.2f}B"
     if absolute >= 1_000_000:
-        return f"{sign}${absolute / 1_000_000:.2f}M"
-    return f"{sign}${absolute:,.2f}"
+        return f"{sign}{prefix}{absolute / 1_000_000:.2f}M"
+    return f"{sign}{prefix}{absolute:,.2f}"
 
 
 def _escape_currency_markdown(text: str) -> str:
     return re.sub(r"(?<!\\)\$(?=[+-]?\d)", "&#36;", text)
 
 
-def _metric_value(metrics: dict[str, Any], key: str) -> tuple[str, str]:
+def _metric_value(metrics: dict[str, Any], key: str, currency: Any = None) -> tuple[str, str]:
     value, basis = workflow._effective_financial_value(metrics, key, allow_profile=False)
     if value is None:
         value, basis = workflow._effective_financial_value(metrics, key)
@@ -105,7 +112,7 @@ def _metric_value(metrics: dict[str, Any], key: str) -> tuple[str, str]:
     if key in {"revenue_growth", "profit_margin"}:
         return f"{value * 100:.2f}%", basis
     if key == "free_cash_flow":
-        return _format_money(value), basis
+        return _money_with_currency(value, currency), basis
     return str(value), basis
 
 
@@ -113,6 +120,10 @@ def render_dashboard(ticker: str, result: dict[str, Any]) -> None:
     markets = result.get("market_summary", {})
     market = markets.get(ticker, {})
     financials = result.get("financial_metrics", {}).get(ticker, {})
+    currency = (
+        financials.get("metadata", {}).get("financial_currency")
+        or market.get("currency")
+    )
     sections = workflow._extract_report_sections(result.get("report", ""))
     warnings = result.get("validation_warnings", [])
     validation = result.get("validation_status", "not_run")
@@ -138,9 +149,9 @@ def render_dashboard(ticker: str, result: dict[str, Any]) -> None:
         daily = market.get("daily_change_percent")
         year_return = market.get("returns", {}).get("1-year", {}).get("return_percent")
         col1, col2, col3 = st.columns(3)
-        col1.metric("Latest close", _format_money(close), f"{daily:+.2f}%" if daily is not None else None)
+        col1.metric("Latest close", _money_with_currency(close, currency), f"{daily:+.2f}%" if daily is not None else None)
         col2.metric("1-year return", f"{year_return:+.2f}%" if year_return is not None else "Unavailable")
-        col3.metric("Market cap", _format_money(financials.get("market_cap")))
+        col3.metric("Market cap", _money_with_currency(financials.get("market_cap"), currency))
         st.caption(
             f"Quote date: {market.get('date', 'unavailable')} · "
             f"Price basis: {market.get('price_basis', 'unavailable')}"
@@ -229,6 +240,27 @@ def render_dashboard(ticker: str, result: dict[str, Any]) -> None:
             st.bar_chart(pd.DataFrame.from_dict(values, orient="index", columns=["Return (%)"]))
         else:
             st.info("Historical returns were unavailable.")
+        global_indices = result.get("global_indices", {})
+        if global_indices:
+            st.markdown("#### Global index snapshot")
+            index_rows = [
+                {
+                    "Index": row.get("name", symbol),
+                    "Symbol": symbol,
+                    "Close": _money_with_currency(row.get("close"), row.get("currency")),
+                    "Daily change (%)": row.get("daily_change_percent"),
+                    "Date": row.get("date", "unavailable"),
+                }
+                for symbol, row in global_indices.items()
+            ]
+            st.dataframe(pd.DataFrame(index_rows), use_container_width=True, hide_index=True)
+            index_moves = {
+                row.get("name", symbol): row.get("daily_change_percent")
+                for symbol, row in global_indices.items()
+                if isinstance(row.get("daily_change_percent"), (int, float))
+            }
+            if index_moves:
+                st.bar_chart(pd.DataFrame.from_dict(index_moves, orient="index", columns=["Daily change (%)"]))
         st.markdown(_escape_currency_markdown(
             sections.get("HISTORICAL PERFORMANCE", "Historical performance was unavailable.")
         ))
@@ -244,7 +276,7 @@ def render_dashboard(ticker: str, result: dict[str, Any]) -> None:
             ("revenue_growth", "profit_margin", "free_cash_flow"),
             ("Revenue growth", "Profit margin", "Free cash flow"),
         ):
-            value, basis = _metric_value(financials, key)
+            value, basis = _metric_value(financials, key, currency=currency)
             display_label = (
                 f"Quarterly {label.lower()}"
                 if basis.startswith("quarterly")
@@ -287,11 +319,11 @@ def render_dashboard(ticker: str, result: dict[str, Any]) -> None:
                 "reported_stockholders_equity", "reported_total_liabilities",
                 "annual_revenue", "annual_operating_income", "annual_net_income",
             }:
-                value = _format_money(value)
+                value = _money_with_currency(value, currency)
             elif key == "calculated_debt_to_equity":
                 value = (
-                    f"{value:.2f}% = {_format_money(entry['numerator'])} total debt / "
-                    f"{_format_money(entry['denominator'])} stockholders' equity"
+                    f"{value:.2f}% = {_money_with_currency(entry['numerator'], currency)} total debt / "
+                    f"{_money_with_currency(entry['denominator'], currency)} stockholders' equity"
                 )
             statement_rows.append({
                 "Metric": key.replace("_", " ").title(),
